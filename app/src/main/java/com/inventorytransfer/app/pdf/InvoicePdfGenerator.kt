@@ -22,9 +22,16 @@ object InvoicePdfGenerator {
     private const val ROW_LINE_H = 13f
 
     // Table column left edges and widths (sum = 532 = page width minus margins).
-    private val colX = floatArrayOf(40f, 66f, 266f, 366f, 406f, 484f)
-    private val colW = floatArrayOf(26f, 200f, 100f, 40f, 78f, 88f)
-    private val headers = listOf("#", "Item", "UPC / Barcode", "Qty", "Unit Cost", "Total")
+    private val colX = floatArrayOf(40f, 62f, 222f, 368f, 402f, 482f)
+    private val colW = floatArrayOf(22f, 160f, 146f, 34f, 80f, 90f)
+    private val headers = listOf("#", "Item", "Barcode", "Qty", "Unit Cost", "Total")
+
+    // Barcode drawing: height of the bars, quiet zone (in modules) and module width limits (points).
+    private const val BAR_H = 26f
+    private const val QUIET_MODULES = 10
+    private const val MAX_MODULE_W = 1.3f
+    private const val MIN_MODULE_W = 0.7f
+    private const val BARCODE_ROW_H = 44f
     private val rightAligned = setOf(3, 4, 5)
 
     private val money: NumberFormat = NumberFormat.getCurrencyInstance(Locale.US)
@@ -43,6 +50,7 @@ object InvoicePdfGenerator {
         val fill = Paint().apply { color = Color.rgb(21, 101, 192) }
         val zebra = Paint().apply { color = Color.rgb(242, 245, 250) }
         val line = Paint().apply { color = Color.LTGRAY; strokeWidth = 0.7f }
+        val small = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 7.5f; typeface = Typeface.MONOSPACE }
 
         val dateText = SimpleDateFormat("MMM d, yyyy  h:mm a", Locale.US).format(Date())
 
@@ -94,14 +102,15 @@ object InvoicePdfGenerator {
 
         session.lines.forEachIndexed { index, l ->
             val nameLines = wrap(l.name.ifBlank { "(unnamed item)" }, colW[1] - 6f, body).take(3)
-            val rowH = nameLines.size * ROW_LINE_H + 6f
+            val bars = InvoiceBarcode.modules(l.barcode)
+            val rowH = maxOf(nameLines.size * ROW_LINE_H + 6f, if (bars != null) BARCODE_ROW_H else 0f)
             if (y + rowH > PAGE_H - 60f) newPage()
 
             if (index % 2 == 1) canvas.drawRect(MARGIN, y - 2f, PAGE_W - MARGIN, y + rowH - 2f, zebra)
             val baseline = y + 9f
             drawCell(canvas, "${index + 1}", 0, baseline, body)
             nameLines.forEachIndexed { i, t -> drawCell(canvas, t, 1, baseline + i * ROW_LINE_H, body) }
-            drawCell(canvas, l.barcode, 2, baseline, body)
+            if (bars == null || !drawBarcode(canvas, bars, l.barcode, y, small)) drawCell(canvas, l.barcode, 2, baseline, body)
             drawCell(canvas, l.qty.toString(), 3, baseline, body)
             drawCell(canvas, fmt(l.unitCost), 4, baseline, body)
             drawCell(canvas, fmt(l.lineTotal), 5, baseline, body)
@@ -145,6 +154,37 @@ object InvoicePdfGenerator {
         val t = ellipsize(text, maxW, paint)
         val x = if (col in rightAligned) colX[col] + colW[col] - 4f - paint.measureText(t) else colX[col] + 3f
         canvas.drawText(t, x, baseline, paint)
+    }
+
+    /**
+     * Draws scannable bars (vector rectangles, crisp when printed) with the code printed underneath.
+     * Returns false if the code is too long to fit at a scannable size.
+     */
+    private fun drawBarcode(canvas: Canvas, bars: BooleanArray, value: String, top: Float, textPaint: Paint): Boolean {
+        val available = colW[2] - 4f
+        val moduleW = minOf(MAX_MODULE_W, available / (bars.size + 2 * QUIET_MODULES))
+        if (moduleW < MIN_MODULE_W) return false
+
+        val totalW = (bars.size + 2 * QUIET_MODULES) * moduleW
+        val left = colX[2] + 2f + (available - totalW) / 2
+        // White background so the quiet zone stays clean on striped rows.
+        canvas.drawRect(left, top, left + totalW, top + BAR_H + 12f, Paint().apply { color = Color.WHITE })
+
+        val black = Paint().apply { color = Color.BLACK; isAntiAlias = false }
+        val barTop = top + 2f
+        var i = 0
+        while (i < bars.size) {
+            if (bars[i]) {
+                var end = i
+                while (end < bars.size && bars[end]) end++
+                val x = left + (QUIET_MODULES + i) * moduleW
+                canvas.drawRect(x, barTop, x + (end - i) * moduleW, barTop + BAR_H, black)
+                i = end
+            } else i++
+        }
+        val tw = textPaint.measureText(value)
+        canvas.drawText(value, left + (totalW - tw) / 2, barTop + BAR_H + 8f, textPaint)
+        return true
     }
 
     private fun drawRight(canvas: Canvas, text: String, baseline: Float, paint: Paint) {
